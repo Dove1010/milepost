@@ -762,6 +762,7 @@ export const ProgrammeDetail = () => {
             phase={phase.data?.tag ?? null}
             refundsOpen={refundsOpen}
             refundable={refundable > ZERO ? formatXlm(refundable) : null}
+            verified={isRegistered.error ? false : isRegistered.data}
           />
         </div>
 
