@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { Buffer } from 'buffer';
 import { AwardCard } from './AwardCard';
 import { ApplyForm } from './ApplyForm';
 import { ApplicationTimelineList } from './ApplicationTimelineList';
@@ -79,6 +80,7 @@ describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
   });
 
   describe('Issue #272 — Recipient: awards and tranche release', () => {
+    // A fixture (non-contract) award id — uses the sample stand-in path.
     const baseAward: RecipientAwardFixture = {
       programmeId: 'PROG-TEST-272',
       programmeName: 'Secondary School Bursaries 2026',
@@ -94,6 +96,16 @@ describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
       condition: 'Milestone 2 completed and verified',
     };
 
+    // A real (contract-address) award for on-chain release tests.
+    const realAward: RecipientAwardFixture = {
+      ...baseAward,
+      programmeId: REAL_PROGRAMME,
+      recipient: RECIPIENT,
+    };
+
+    const ATTEST_HEX = 'a'.repeat(64); // valid 64-char hex
+    const ATTESTER = 'G' + 'B'.repeat(55);
+
     it('renders tranche tiles distinguishing released, proof-received, and locked', () => {
       render(
         <MemoryRouter>
@@ -101,83 +113,157 @@ describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
         </MemoryRouter>
       );
 
-      // Tranche 1 should be released
       expect(screen.getByText('Tranche 1')).toBeDefined();
       expect(screen.getByText('Released')).toBeDefined();
-
-      // Tranche 2 should be proof received (attestationReady: true)
       expect(screen.getByText('Tranche 2')).toBeDefined();
       expect(screen.getByText('Proof received')).toBeDefined();
-
-      // Tranche 3 should be locked
       expect(screen.getByText('Tranche 3')).toBeDefined();
       expect(screen.getByText('Locked')).toBeDefined();
     });
 
     it('distinguishes waiting-on-verifier from locked when proof is not ready', () => {
-      const waitingAward: RecipientAwardFixture = {
-        ...baseAward,
-        attestationReady: false,
-      };
-
+      const waitingAward: RecipientAwardFixture = { ...baseAward, attestationReady: false };
       render(
         <MemoryRouter>
           <AwardCard award={waitingAward} />
         </MemoryRouter>
       );
-
       expect(screen.getByText('Waiting on verifier')).toBeDefined();
       expect(screen.getByText(/Waiting on your verifier/i)).toBeDefined();
       expect(screen.getByText('Locked')).toBeDefined();
     });
 
-    it('announces successful tranche release', async () => {
-      vi.useFakeTimers();
-
+    it('sample: announces successful tranche release', async () => {
       render(
         <MemoryRouter>
-          <AwardCard award={baseAward} />
+          <AwardCard award={baseAward} sampleDelayMs={0} />
         </MemoryRouter>
       );
 
-      const releaseBtn = screen.getByRole('button', { name: /release tranche/i });
-      fireEvent.click(releaseBtn);
-
-      expect(screen.getByText(/releasing… waiting for the network/i)).toBeDefined();
-
-      act(() => {
-        vi.advanceTimersByTime(1300);
-      });
-
+      fireEvent.click(screen.getByRole('button', { name: /release tranche/i }));
+      expect(await screen.findByText(/Tranche 2 released/i)).toBeDefined();
       expect(mockAnnounce).toHaveBeenCalledWith('Tranche 2 released.');
-      vi.useRealTimers();
     });
 
-    it('handles already-used error (error 22) through explain() and announces failure', () => {
-      vi.useFakeTimers();
+    it('real: sends program.release with attestation Buffer and attester address', async () => {
+      programme = makeProgramme({ releaseResult: 'ok' });
 
       render(
         <MemoryRouter>
-          <AwardCard award={baseAward} simulateAlreadyUsedError={true} />
+          <AwardCard award={realAward} sampleDelayMs={0} />
         </MemoryRouter>
       );
 
-      const releaseBtn = screen.getByRole('button', { name: /release tranche/i });
-      fireEvent.click(releaseBtn);
+      // Open the release form.
+      fireEvent.click(screen.getByRole('button', { name: /release tranche/i }));
 
-      act(() => {
-        vi.advanceTimersByTime(1300);
+      // Fill in attestation UID and attester.
+      fireEvent.change(screen.getByLabelText(/attestation uid/i), {
+        target: { value: ATTEST_HEX },
+      });
+      fireEvent.change(screen.getByLabelText(/attester address/i), {
+        target: { value: ATTESTER },
       });
 
-      const errExplain = explain(22, 'program');
-      expect(screen.getByText(errExplain.message)).toBeDefined();
-      expect(screen.getByText(/program error 22/i)).toBeDefined();
-      expect(mockAnnounce).toHaveBeenCalledWith(
-        'Tranche not released: proof already used.',
-        'alert'
+      // "Where this goes" confirmation is shown before signing.
+      expect(screen.getByText(/Where this goes:/i)).toBeDefined();
+
+      fireEvent.click(screen.getByRole('button', { name: /sign and release/i }));
+
+      expect(await screen.findByText(/Tranche 2 released/i)).toBeDefined();
+      expect(programme.release).toHaveBeenCalledWith({
+        recipient: RECIPIENT,
+        attestation: expect.any(Buffer),
+        attester: ATTESTER,
+      });
+      const { attestation } = programme.release.mock.calls[0][0] as { attestation: Buffer };
+      expect(attestation).toHaveLength(32);
+      expect(mockAnnounce).toHaveBeenCalledWith('Tranche 2 released.');
+    });
+
+    it('real error 22 (AttestationAlreadyUsed): shows the specific explanation', async () => {
+      programme = makeProgramme({ releaseResult: 'alreadyUsed' });
+
+      render(
+        <MemoryRouter>
+          <AwardCard award={realAward} sampleDelayMs={0} />
+        </MemoryRouter>
       );
 
-      vi.useRealTimers();
+      fireEvent.click(screen.getByRole('button', { name: /release tranche/i }));
+      fireEvent.change(screen.getByLabelText(/attestation uid/i), {
+        target: { value: ATTEST_HEX },
+      });
+      fireEvent.change(screen.getByLabelText(/attester address/i), {
+        target: { value: ATTESTER },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /sign and release/i }));
+
+      const err22 = explainCode('program', 22);
+      expect(await screen.findByText(err22.message)).toBeDefined();
+      expect(screen.queryByText(/something went wrong that we do not have/i)).toBeNull();
+    });
+
+    it('real error 21 (AttestationInvalid / non-verifier): shows the specific explanation', async () => {
+      programme = makeProgramme({ releaseResult: 'invalidAttestation' });
+
+      render(
+        <MemoryRouter>
+          <AwardCard award={realAward} sampleDelayMs={0} />
+        </MemoryRouter>
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /release tranche/i }));
+      fireEvent.change(screen.getByLabelText(/attestation uid/i), {
+        target: { value: ATTEST_HEX },
+      });
+      fireEvent.change(screen.getByLabelText(/attester address/i), {
+        target: { value: ATTESTER },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /sign and release/i }));
+
+      const err21 = explainCode('program', 21);
+      expect(await screen.findByText(err21.message)).toBeDefined();
+    });
+
+    it('real error 34 (PolicyNotInstalled): shows the specific explanation for Restricted', async () => {
+      programme = makeProgramme({ releaseResult: 'policyNotInstalled' });
+      const restrictedAward: RecipientAwardFixture = {
+        ...realAward,
+        mode: 'Restricted',
+      };
+
+      render(
+        <MemoryRouter>
+          <AwardCard award={restrictedAward} sampleDelayMs={0} />
+        </MemoryRouter>
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /release tranche/i }));
+      fireEvent.change(screen.getByLabelText(/attestation uid/i), {
+        target: { value: ATTEST_HEX },
+      });
+      fireEvent.change(screen.getByLabelText(/attester address/i), {
+        target: { value: ATTESTER },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /sign and release/i }));
+
+      const err34 = explainCode('program', 34);
+      expect(await screen.findByText(err34.message)).toBeDefined();
+    });
+
+    it('shows where the money goes before signing for each mode', () => {
+      const modes: Array<RecipientAwardFixture['mode']> = ['Direct', 'Allocated', 'Restricted', 'Open'];
+      for (const mode of modes) {
+        const { unmount } = render(
+          <MemoryRouter>
+            <AwardCard award={{ ...realAward, mode }} sampleDelayMs={0} />
+          </MemoryRouter>
+        );
+        fireEvent.click(screen.getByRole('button', { name: /release tranche/i }));
+        expect(screen.getByText(/Where this goes:/i)).toBeDefined();
+        unmount();
+      }
     });
   });
 
@@ -420,42 +506,151 @@ describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
     });
 
     it('validates amount input and enables submit when valid', async () => {
-      vi.useFakeTimers();
-
+      // Use a sample programme (no real contract call) so the submit path is
+      // the sampleSendable stand-in — no wallet signing needed.
       render(
         <MemoryRouter>
-          <ApplyForm />
+          <ApplyForm sampleDelayMs={0} />
         </MemoryRouter>
       );
 
+      // Wait for programme list to load.
+      const amountInput = await screen.findByPlaceholderText('0');
+      const notesInput = screen.getByRole('textbox', { name: /application notes/i });
       // Wait for programme list to load so a selection exists and submit can be enabled.
       const input = await screen.findByPlaceholderText('0');
       const submitBtn = screen.getByRole('button', { name: /submit application/i }) as HTMLButtonElement;
 
+      // Initially disabled (no amount, no notes).
       expect(submitBtn.disabled).toBe(true);
 
-      // Type an invalid amount (0)
-      fireEvent.change(input, { target: { value: '0' } });
+      // Invalid amount (zero).
+      fireEvent.change(amountInput, { target: { value: '0' } });
       const err3 = explain(3, 'program');
       expect(screen.getByText(err3.message)).toBeDefined();
       expect(submitBtn.disabled).toBe(true);
 
-      // Type a valid amount
-      fireEvent.change(input, { target: { value: '1500' } });
+      // Valid amount but still no notes — stays disabled.
+      fireEvent.change(amountInput, { target: { value: '1500' } });
+      expect(submitBtn.disabled).toBe(true);
+
+      // Fill notes — now enabled.
+      fireEvent.change(notesInput, { target: { value: 'Exam fees for term 3.' } });
       expect(submitBtn.disabled).toBe(false);
 
       fireEvent.click(submitBtn);
 
-      expect(screen.getByText(/Submitting your application…/i)).toBeDefined();
+      // Receipt appears once the stand-in resolves.
+      expect(await screen.findByText(/✓ Application submitted/i)).toBeDefined();
+      expect(mockAnnounce).toHaveBeenCalledWith('Application submitted.');
+    });
 
-      act(() => {
-        vi.advanceTimersByTime(1300);
+    it('sample submission: uses the stand-in path and shows "Sample ·" in the receipt', async () => {
+      render(
+        <MemoryRouter>
+          <ApplyForm sampleDelayMs={0} />
+        </MemoryRouter>
+      );
+
+      // Wait for the sample programme list.
+      await screen.findByText(/Secondary school bursaries 2026/i);
+
+      fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '500' } });
+      fireEvent.change(screen.getByRole('textbox', { name: /application notes/i }), {
+        target: { value: 'Bursary for term 1 fees.' },
       });
 
-      expect(screen.getByText(/✓ Application submitted/i)).toBeDefined();
-      expect(mockAnnounce).toHaveBeenCalledWith('Application submitted.');
+      fireEvent.click(screen.getByRole('button', { name: /submit application/i }));
 
-      vi.useRealTimers();
+      // Receipt shows "Sample ·" prefix.
+      expect(await screen.findByText(/Sample · ✓ Application submitted/i)).toBeDefined();
+
+      // programme.apply was never called — the sample path goes through sampleSendable.
+      expect(programme.apply).not.toHaveBeenCalled();
+
+      // The receipt shows a metadata hash (hex chars).
+      expect(screen.getByText(/Application hash/i)).toBeDefined();
+    });
+
+    it('real submission: calls programme.apply with stroops and a 32-byte hash, shows receipt', async () => {
+      // Inject a real (non-sample) programme id into the index so it appears
+      // in the "real" group above the sample group.
+      const { fetchProgrammes } = await import('../../lib/indexer');
+      (fetchProgrammes as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: REAL_PROGRAMME, name: 'Live Grant Round', creator: null, createdLedger: null },
+      ]);
+
+      programme = makeProgramme({ applyResult: 'ok' });
+
+      render(
+        <MemoryRouter>
+          <ApplyForm sampleDelayMs={0} />
+        </MemoryRouter>
+      );
+
+      // Wait for the real programme to appear.
+      expect(await screen.findByText('Live Grant Round')).toBeDefined();
+
+      // Select it.
+      fireEvent.click(screen.getByRole('radio', { name: 'Live Grant Round' }));
+
+      fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '1000' } });
+      fireEvent.change(screen.getByRole('textbox', { name: /application notes/i }), {
+        target: { value: 'Equipment purchase for the workshop.' },
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /submit application/i }));
+
+      expect(await screen.findByText(/✓ Application submitted/i)).toBeDefined();
+
+      // programme.apply was called with the wallet address, the correct stroops,
+      // and a 32-byte Buffer.
+      expect(programme.apply).toHaveBeenCalledWith({
+        applicant: RECIPIENT,
+        requested: 10_000_000_000n, // 1000 USDC in stroops
+        metadata_hash: expect.any(Buffer),
+      });
+
+      const callArgs = programme.apply.mock.calls[0][0] as { metadata_hash: Buffer };
+      expect(callArgs.metadata_hash).toHaveLength(32);
+
+      // Receipt shows the tx hash and the metadata hash.
+      expect(screen.getByText(/Application hash/i)).toBeDefined();
+      expect(screen.getByText(/TESTHASH/i)).toBeDefined();
+    });
+
+    it('AlreadyApplied (error 9): shows the human explanation, not a generic error', async () => {
+      const { fetchProgrammes } = await import('../../lib/indexer');
+      (fetchProgrammes as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: REAL_PROGRAMME, name: 'Live Grant Round', creator: null, createdLedger: null },
+      ]);
+
+      programme = makeProgramme({ applyResult: 'alreadyApplied' });
+
+      render(
+        <MemoryRouter>
+          <ApplyForm sampleDelayMs={0} />
+        </MemoryRouter>
+      );
+
+      await screen.findByText('Live Grant Round');
+      fireEvent.click(screen.getByRole('radio', { name: 'Live Grant Round' }));
+      fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '500' } });
+      fireEvent.change(screen.getByRole('textbox', { name: /application notes/i }), {
+        target: { value: 'Second attempt notes.' },
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /submit application/i }));
+
+      // AlreadyApplied = error 9 — explain() should produce the specific message.
+      const err9 = explainCode('program', 9);
+      expect(await screen.findByText(err9.message)).toBeDefined();
+
+      // Must NOT show the generic fallback message.
+      expect(screen.queryByText(/something went wrong that we do not have/i)).toBeNull();
+
+      // The form stays on screen so the recipient can see the error — no receipt shown.
+      expect(screen.queryByText(/✓ Application submitted/i)).toBeNull();
     });
   });
 
