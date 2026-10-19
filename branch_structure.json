@@ -1,0 +1,18 @@
+{
+  "default_branch": "dev",
+  "branches": [
+    "dev",
+    "feat/sample-tag-check",
+    "origin"
+  ],
+  "parent": {
+    "dev": null,
+    "feat/sample-tag-check": "dev",
+    "origin": "dev"
+  },
+  "order": [
+    "dev",
+    "feat/sample-tag-check",
+    "origin"
+  ]
+}
